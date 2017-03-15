@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/nats-io/go-nats"
+	"io"
 	"math/rand"
 	"net"
 	"os"
+	"os/signal"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -94,9 +99,28 @@ func whoIsMe() string {
 	}
 	for _, inter := range ifs {
 		mac := inter.HardwareAddr
-		return fmt.Sprintf("%v:%d", mac, rand.Intn(10))
+		return fmt.Sprintf("%v[%d]", mac, rand.Intn(10))
 	}
 	panic("no mac detected")
+}
+
+func ReadLine(reader io.Reader, inputLineChan chan string) {
+	buf := bufio.NewReader(reader)
+	line, err := buf.ReadBytes('\n')
+	for err == nil {
+		line = bytes.TrimRight(line, "\n")
+		if len(line) > 0 {
+			if line[len(line)-1] == 13 { //'\r'
+				line = bytes.TrimRight(line, "\r")
+			}
+			//return string(line) //~ Do not do output
+			inputLineChan <- string(line)
+		}
+		line, err = buf.ReadBytes('\n')
+	}
+	if len(line) > 0 {
+		inputLineChan <- string(line)
+	}
 }
 
 func test1() {
@@ -117,6 +141,7 @@ func test1() {
 func main() {
 	test1() // The test is passed.
 	nc, err := nats.Connect(TargetServer)
+	defer nc.Close()
 	if err != nil {
 		fmt.Printf("Error:%v\n", err)
 		fmt.Printf("Quit")
@@ -126,12 +151,22 @@ func main() {
 	talker := CreateChatter()
 	nc.Subscribe(Subject, talker.getMsgHandler())
 
-	var inputText string
+	osc := make(chan os.Signal, 1)
+	signal.Notify(osc, os.Interrupt, syscall.Interrupt, os.SIGTERM)
+
+	lineSwitcher := make(chan string)
+	go ReadLine(os.Stdin, lineSwitcher)
+A100:
 	for {
 		talker.doInLock(true, func() { fmt.Printf(XHint) })
-		fmt.Scanf("%s\n", &inputText)
+		select {
+		case newLine := <-lineSwitcher:
+			//fmt.Scanf("%s\n", &inputText)
+			inputText := strings.TrimRight(newLine, "\t \n")
+			nc.Publish(Subject, talker.emitMsg(inputText))
+		case <-osc:
+			break A100
+		}
 		talker.doInLock(false)
-		inputText := strings.TrimRight(inputText, "\t \n")
-		nc.Publish(Subject, talker.emitMsg(inputText))
 	}
 }
